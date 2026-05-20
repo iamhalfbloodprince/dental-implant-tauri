@@ -1,7 +1,7 @@
 use crate::audit::{self, AuditEventType};
 use crate::db::{self, has_user_account};
 use crate::logging;
-use crate::models::{AuthStatus, PasswordPayload};
+use crate::models::{AuthStatus, PasswordPayload, SecurityQuestion, SecurityQuestionPayload};
 use crate::state::{AuthState, DbConn, RateLimiter};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -60,9 +60,19 @@ pub fn auth_status(
   auth: State<'_, AuthState>,
 ) -> Result<AuthStatus, String> {
   let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  
+  let has_security_q: i64 = conn
+    .query_row(
+      "SELECT COUNT(*) FROM users WHERE security_question_id IS NOT NULL",
+      [],
+      |r| r.get(0),
+    )
+    .unwrap_or(0);
+    
   Ok(AuthStatus {
     has_account: has_user_account(&conn),
     authenticated: is_authenticated(&auth)?,
+    has_security_question: has_security_q > 0,
   })
 }
 
@@ -70,7 +80,7 @@ pub fn auth_status(
 pub fn auth_setup(
   db: State<'_, DbConn>,
   auth: State<'_, AuthState>,
-  payload: PasswordPayload,
+  payload: SecurityQuestionPayload,
 ) -> Result<(), String> {
   validate_password(&payload.password)?;
   logging::log_info("Attempting to set up new account");
@@ -84,11 +94,19 @@ pub fn auth_setup(
     .hash_password(payload.password.as_bytes(), &salt)
     .map_err(|e| e.to_string())?
     .to_string();
+  
+  // Hash security answer
+  let answer_salt = SaltString::generate(&mut OsRng);
+  let answer_hash = argon2
+    .hash_password(payload.security_answer.as_bytes(), &answer_salt)
+    .map_err(|e| e.to_string())?
+    .to_string();
+  
   let now = db::now_iso();
   conn
     .execute(
-      "INSERT INTO users (id, password_hash, created_at, updated_at) VALUES (1, ?1, ?2, ?3)",
-      rusqlite::params![hash, now, now],
+      "INSERT INTO users (id, password_hash, security_question_id, security_answer_hash, created_at, updated_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+      rusqlite::params![hash, payload.security_question_id, answer_hash, now, now],
     )
     .map_err(|e| e.to_string())?;
   conn
@@ -185,5 +203,101 @@ pub fn auth_change_password(
       rusqlite::params![new_hash, now],
     )
     .map_err(|e| e.to_string())?;
+  Ok(())
+}
+
+#[tauri::command]
+pub fn security_questions_list(
+  db: State<'_, DbConn>,
+) -> Result<Vec<SecurityQuestion>, String> {
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  let mut stmt = conn
+    .prepare("SELECT id, question FROM security_questions ORDER BY id")
+    .map_err(|e| e.to_string())?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok(SecurityQuestion {
+        id: r.get(0)?,
+        question: r.get(1)?,
+      })
+    })
+    .map_err(|e| e.to_string())?;
+  rows.map(|x| x.map_err(|e| e.to_string())).collect()
+}
+
+#[tauri::command]
+pub fn auth_reset_password_with_security_question(
+  db: State<'_, DbConn>,
+  new_password: String,
+  security_answer: String,
+) -> Result<(), String> {
+  validate_password(&new_password)?;
+  logging::log_info("Attempting password reset with security question");
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  
+  let (_question_id, stored_answer_hash): (i64, String) = conn
+    .query_row(
+      "SELECT security_question_id, security_answer_hash FROM users WHERE id = 1",
+      [],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(|_| "Security question not set up".to_string())?;
+  
+  let parsed = PasswordHash::new(&stored_answer_hash).map_err(|e| e.to_string())?;
+  Argon2::default()
+    .verify_password(security_answer.as_bytes(), &parsed)
+    .map_err(|_| "Security answer incorrect".to_string())?;
+  
+  audit::log_audit_event(AuditEventType::PasswordChange, Some("user"), "Password reset via security question");
+  
+  let salt = SaltString::generate(&mut OsRng);
+  let argon2 = Argon2::default();
+  let new_hash = argon2
+    .hash_password(new_password.as_bytes(), &salt)
+    .map_err(|e| e.to_string())?
+    .to_string();
+  let now = db::now_iso();
+  conn
+    .execute(
+      "UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE id = 1",
+      rusqlite::params![new_hash, now],
+    )
+    .map_err(|e| e.to_string())?;
+  
+  logging::log_info("Password reset successful via security question");
+  Ok(())
+}
+
+#[tauri::command]
+pub fn auth_setup_security_question(
+  db: State<'_, DbConn>,
+  auth: State<'_, AuthState>,
+  question_id: i64,
+  security_answer: String,
+) -> Result<(), String> {
+  let is_auth = is_authenticated(&auth)?;
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  db::require_authenticated(&conn, is_auth)?;
+  
+  logging::log_info("Setting up security question");
+  
+  // Hash security answer
+  let answer_salt = SaltString::generate(&mut OsRng);
+  let argon2 = Argon2::default();
+  let answer_hash = argon2
+    .hash_password(security_answer.as_bytes(), &answer_salt)
+    .map_err(|e| e.to_string())?
+    .to_string();
+  
+  let now = db::now_iso();
+  conn
+    .execute(
+      "UPDATE users SET security_question_id = ?1, security_answer_hash = ?2, updated_at = ?3 WHERE id = 1",
+      rusqlite::params![question_id, answer_hash, now],
+    )
+    .map_err(|e| e.to_string())?;
+  
+  audit::log_audit_event(AuditEventType::PasswordChange, Some("user"), "Security question set up");
+  logging::log_info("Security question setup successful");
   Ok(())
 }

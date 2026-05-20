@@ -7,11 +7,26 @@ pub struct PasswordPayload {
   pub password: String,
 }
 
+#[derive(Deserialize)]
+pub struct SecurityQuestionPayload {
+  pub password: String,
+  pub security_question_id: i64,
+  pub security_answer: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityQuestion {
+  pub id: i64,
+  pub question: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStatus {
   pub has_account: bool,
   pub authenticated: bool,
+  pub has_security_question: bool,
 }
 
 #[derive(Serialize)]
@@ -22,6 +37,14 @@ pub struct AppPaths {
   pub files: String,
   pub backups: String,
   pub exports: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTracking {
+  pub last_backup_time: Option<String>,
+  pub backup_count: i64,
+  pub days_since_last_backup: i64,
 }
 
 // ——— Clinics ———

@@ -48,6 +48,9 @@ pub fn run() {
       commands::auth::auth_login,
       commands::auth::auth_logout,
       commands::auth::auth_change_password,
+      commands::auth::security_questions_list,
+      commands::auth::auth_reset_password_with_security_question,
+      commands::auth::auth_setup_security_question,
       commands::paths::get_app_paths,
       commands::clinics::clinics_list,
       commands::clinics::clinics_create,
@@ -63,6 +66,7 @@ pub fn run() {
       commands::patients::patients_create,
       commands::patients::patients_update,
       commands::patients::export_patients_csv,
+      commands::patients::export_all_data,
       commands::reports::reports_csv_pending_cbct,
       commands::reports::reports_csv_failed_cases,
       commands::clinical::medical_get,
@@ -108,6 +112,8 @@ pub fn run() {
       commands::file_store::file_set_include_in_letter,
       commands::backup::backup_create,
       commands::backup::backup_restore,
+      commands::backup::backup_tracking_status,
+      commands::backup::backup_record_backup,
     ])
     .run(tauri::generate_context!())
     .map_err(|e| {

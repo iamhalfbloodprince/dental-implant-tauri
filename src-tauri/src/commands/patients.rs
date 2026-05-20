@@ -2,7 +2,7 @@ use crate::db;
 use crate::models::{Patient, PatientFilters, PatientInput};
 use crate::state::{AuthState, DbConn};
 use rusqlite::OptionalExtension;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 fn require(
   db: &State<'_, DbConn>,
@@ -300,4 +300,82 @@ fn csv_esc(s: &str) -> String {
   } else {
     s.to_string()
   }
+}
+
+#[tauri::command]
+pub fn export_all_data(
+  app: AppHandle,
+  db: State<'_, DbConn>,
+  auth: State<'_, AuthState>,
+) -> Result<String, String> {
+  require(&db, &auth)?;
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  
+  // Export all data as JSON
+  let mut data = serde_json::json!({
+    "export_date": db::now_iso(),
+    "version": "1.0",
+    "patients": [],
+    "clinics": []
+  });
+  
+  // Export clinics
+  let clinics: Vec<serde_json::Value> = conn
+    .prepare("SELECT * FROM clinics")
+    .map_err(|e| e.to_string())?
+    .query_map([], |r| {
+      let mut clinic_map = serde_json::Map::new();
+      for i in 0..r.as_ref().column_count() {
+        if let Ok(name) = r.as_ref().column_name(i) {
+          if let Ok(value) = r.get::<_, String>(i) {
+            clinic_map.insert(name.to_string(), serde_json::Value::String(value));
+          } else if let Ok(value) = r.get::<_, i64>(i) {
+            clinic_map.insert(name.to_string(), serde_json::Value::Number(value.into()));
+          }
+        }
+      }
+      Ok(serde_json::Value::Object(clinic_map))
+    })
+    .map_err(|e| e.to_string())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
+  
+  data["clinics"] = serde_json::Value::Array(clinics);
+  
+  // Export patients
+  let patients: Vec<serde_json::Value> = conn
+    .prepare("SELECT * FROM patients WHERE is_archived = 0")
+    .map_err(|e| e.to_string())?
+    .query_map([], |r| {
+      let mut patient_map = serde_json::Map::new();
+      for i in 0..r.as_ref().column_count() {
+        if let Ok(name) = r.as_ref().column_name(i) {
+          if let Ok(value) = r.get::<_, String>(i) {
+            patient_map.insert(name.to_string(), serde_json::Value::String(value));
+          } else if let Ok(value) = r.get::<_, i64>(i) {
+            patient_map.insert(name.to_string(), serde_json::Value::Number(value.into()));
+          }
+        }
+      }
+      Ok(serde_json::Value::Object(patient_map))
+    })
+    .map_err(|e| e.to_string())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
+  
+  data["patients"] = serde_json::Value::Array(patients);
+  
+  // Save to file
+  let exports_dir = db::app_data_root(&app)?.join("exports");
+  std::fs::create_dir_all(&exports_dir).map_err(|e| e.to_string())?;
+  
+  let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+  let filename = format!("dental_implant_export_{}.json", timestamp);
+  let filepath = exports_dir.join(&filename);
+  
+  let json_string = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+  std::fs::write(&filepath, json_string).map_err(|e| e.to_string())?;
+  
+  crate::logging::log_info(&format!("Exported all data to {}", filename));
+  Ok(filepath.to_string_lossy().into_owned())
 }

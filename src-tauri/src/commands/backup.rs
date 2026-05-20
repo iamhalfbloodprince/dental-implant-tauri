@@ -70,7 +70,19 @@ pub fn backup_create(app: AppHandle) -> Result<String, String> {
 
   zip.finish().map_err(|e| e.to_string())?;
 
-  Ok(save_path.to_string_lossy().into_owned())
+  let save_path_str = save_path.to_string_lossy().into_owned();
+  
+  // Record this backup in tracking
+  let _ = backup_record_backup_internal_and_log(&save_path_str);
+  
+  Ok(save_path_str)
+}
+
+fn backup_record_backup_internal_and_log(save_path: &str) -> Result<(), String> {
+  // This is a simplified version since we don't have DB access here
+  // The actual recording is done in the backup_record_backup command
+  crate::logging::log_info(&format!("Backup created at {}", save_path));
+  Ok(())
 }
 
 #[tauri::command]
@@ -129,5 +141,56 @@ pub fn backup_restore(app: AppHandle, db: State<'_, DbConn>) -> Result<(), Strin
   }
 
   let _ = fs::remove_dir_all(&temp);
+  Ok(())
+}
+
+#[tauri::command]
+pub fn backup_tracking_status(
+  db: State<'_, DbConn>,
+) -> Result<Option<crate::models::BackupTracking>, String> {
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  
+  let (last_backup, backup_count): (Option<String>, i64) = conn
+    .query_row(
+      "SELECT last_backup_time, backup_count FROM backup_tracking WHERE id = 1",
+      [],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(|e| e.to_string())?;
+  
+  let days_since = if let Some(last_backup_time) = last_backup.as_ref() {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(last_backup_time) {
+      let now = chrono::Utc::now();
+      let duration = now.signed_duration_since(dt);
+      duration.num_days()
+    } else {
+      999 // Invalid date
+    }
+  } else {
+    999 // Never backed up
+  };
+  
+  Ok(Some(crate::models::BackupTracking {
+    last_backup_time: last_backup,
+    backup_count,
+    days_since_last_backup: days_since,
+  }))
+}
+
+#[tauri::command]
+pub fn backup_record_backup(
+  db: State<'_, DbConn>,
+) -> Result<(), String> {
+  let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
+  let now = db::now_iso();
+  
+  conn
+    .execute(
+      "UPDATE backup_tracking SET last_backup_time = ?1, backup_count = backup_count + 1, updated_at = ?2 WHERE id = 1",
+      rusqlite::params![now, now],
+    )
+    .map_err(|e| e.to_string())?;
+  
+  crate::logging::log_info("Backup recorded successfully");
   Ok(())
 }

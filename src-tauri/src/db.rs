@@ -73,6 +73,16 @@ fn run_pending_migrations(conn: &Connection) -> Result<(), String> {
       .execute_batch(include_str!("../migrations/004_prd_letters_files_logbook_patient.sql"))
       .map_err(|e| e.to_string())?;
   }
+  if current < 5 {
+    conn
+      .execute_batch(include_str!("../migrations/005_security_questions.sql"))
+      .map_err(|e| e.to_string())?;
+  }
+  if current < 6 {
+    conn
+      .execute_batch(include_str!("../migrations/006_backup_tracking.sql"))
+      .map_err(|e| e.to_string())?;
+  }
   Ok(())
 }
 
