@@ -1,9 +1,11 @@
+mod audit;
 mod commands;
 mod db;
+mod logging;
 mod models;
 mod state;
 
-use state::{AuthState, DbConn};
+use state::{AuthState, DbConn, RateLimiter};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -13,12 +15,31 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .setup(|app| {
       let handle = app.handle().clone();
+      let root = db::app_data_root(&handle)?;
+      
+      // Initialize logging
+      let log_dir = root.join("logs");
+      std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log directory: {}", e))?;
+      logging::init_logger(&log_dir).map_err(|e| format!("Failed to initialize logger: {}", e))?;
+      logging::log_info("Application starting up");
+      
+      // Initialize audit logging
+      let audit_dir = root.join("audit");
+      std::fs::create_dir_all(&audit_dir).map_err(|e| format!("Failed to create audit directory: {}", e))?;
+      audit::init_audit_logger(&audit_dir).map_err(|e| format!("Failed to initialize audit logger: {}", e))?;
+      logging::log_info("Audit logging initialized");
+      
       let path = db::db_path(&handle)?;
+      logging::log_info(&format!("Database path: {:?}", path));
       let conn = db::connect_and_migrate(&path)?;
+      logging::log_info("Database connected and migrated");
+      
       app.manage(DbConn {
         conn: Mutex::new(conn),
       });
       app.manage(AuthState::default());
+      app.manage(RateLimiter::default());
+      logging::log_info("Application setup completed");
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -89,5 +110,9 @@ pub fn run() {
       commands::backup::backup_restore,
     ])
     .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .map_err(|e| {
+      eprintln!("Failed to run Tauri application: {}", e);
+      std::process::exit(1);
+    })
+    .unwrap();
 }

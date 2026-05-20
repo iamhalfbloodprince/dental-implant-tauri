@@ -28,3 +28,7 @@ walkdir = "2"
 base64 = "0.22"
 rfd = "0.14"
 open = "5"
+
+[dev-dependencies]
+# Add testing dependencies when needed
+# For example: tokio-test = "0.4"

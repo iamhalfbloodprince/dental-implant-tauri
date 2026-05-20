@@ -1,4 +1,5 @@
 use crate::db;
+use crate::logging;
 use crate::models::{FileImportPayload, PatientFile, SavePdfFilePayload};
 use crate::state::{AuthState, DbConn};
 use base64::{engine::general_purpose, Engine as _};
@@ -6,6 +7,37 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
+
+// File validation constants
+const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50MB
+const MAX_PDF_SIZE: u64 = 10 * 1024 * 1024; // 10MB for PDFs
+const ALLOWED_EXTENSIONS: &[&str] = &[
+  "pdf", "jpg", "jpeg", "png", "doc", "docx", "txt", "xls", "xlsx", "ppt", "pptx"
+];
+
+fn validate_file_size(size: u64, is_pdf: bool) -> Result<(), String> {
+  let max_size = if is_pdf { MAX_PDF_SIZE } else { MAX_FILE_SIZE };
+  if size > max_size {
+    return Err(format!(
+      "File size {}MB exceeds maximum allowed size of {}MB",
+      size / (1024 * 1024),
+      max_size / (1024 * 1024)
+    ));
+  }
+  Ok(())
+}
+
+fn validate_file_extension(ext: &str) -> Result<(), String> {
+  let ext_lower = ext.to_lowercase();
+  if !ALLOWED_EXTENSIONS.contains(&ext_lower.as_str()) {
+    return Err(format!(
+      "File extension '.{}' is not allowed. Allowed extensions: {}",
+      ext,
+      ALLOWED_EXTENSIONS.join(", ")
+    ));
+  }
+  Ok(())
+}
 
 fn require(
   db: &State<'_, DbConn>,
@@ -106,6 +138,16 @@ pub fn file_import_dialog(
     .extension()
     .and_then(|e| e.to_str())
     .unwrap_or("");
+  
+  // Validate file extension
+  validate_file_extension(ext)?;
+  
+  // Get file metadata before copying for validation
+  let source_meta = fs::metadata(&picked).map_err(|e| e.to_string())?;
+  validate_file_size(source_meta.len(), false)?;
+  
+  logging::log_info(&format!("Importing file: {} ({} bytes)", orig, source_meta.len()));
+  
   let stored = format!("{}_{}.{}", Uuid::new_v4(), chrono::Utc::now().timestamp(), ext);
   let dest = dest_dir.join(&stored);
   fs::copy(&picked, &dest).map_err(|e| e.to_string())?;
@@ -166,6 +208,12 @@ pub fn file_save_blob(
   let bytes = general_purpose::STANDARD
     .decode(payload.base64.trim())
     .map_err(|e| e.to_string())?;
+  
+  // Validate PDF size
+  validate_file_size(bytes.len() as u64, true)?;
+  
+  logging::log_info(&format!("Saving PDF blob: {} ({} bytes)", payload.original_name, bytes.len()));
+  
   fs::write(&dest, bytes).map_err(|e| e.to_string())?;
   let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
   let path_str = dest.to_string_lossy().into_owned();

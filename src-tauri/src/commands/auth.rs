@@ -1,10 +1,50 @@
+use crate::audit::{self, AuditEventType};
 use crate::db::{self, has_user_account};
+use crate::logging;
 use crate::models::{AuthStatus, PasswordPayload};
-use crate::state::{AuthState, DbConn};
+use crate::state::{AuthState, DbConn, RateLimiter};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use password_hash::rand_core::OsRng;
 use tauri::State;
+
+fn validate_password(password: &str) -> Result<(), String> {
+  // Length requirement
+  if password.len() < 12 {
+    return Err("Password must be at least 12 characters long".into());
+  }
+  
+  // Complexity requirements
+  let has_upper = password.chars().any(|c| c.is_uppercase());
+  let has_lower = password.chars().any(|c| c.is_lowercase());
+  let has_digit = password.chars().any(|c| c.is_ascii_digit());
+  let has_special = password.chars().any(|c| "!@#$%^&*()_+-=[]{}|;:,.<>?".contains(c));
+  
+  if !has_upper {
+    return Err("Password must contain at least one uppercase letter".into());
+  }
+  if !has_lower {
+    return Err("Password must contain at least one lowercase letter".into());
+  }
+  if !has_digit {
+    return Err("Password must contain at least one digit".into());
+  }
+  if !has_special {
+    return Err("Password must contain at least one special character (!@#$%^&* etc.)".into());
+  }
+  
+  // Common password check (basic list)
+  let common_passwords = vec![
+    "password", "123456", "12345678", "qwerty", "abc123",
+    "letmein", "monkey", "dragon", "master", "hello"
+  ];
+  let password_lower = password.to_lowercase();
+  if common_passwords.contains(&password_lower.as_str()) {
+    return Err("Password is too common. Please choose a more secure password".into());
+  }
+  
+  Ok(())
+}
 
 fn is_authenticated(auth: &AuthState) -> Result<bool, String> {
   auth
@@ -32,9 +72,8 @@ pub fn auth_setup(
   auth: State<'_, AuthState>,
   payload: PasswordPayload,
 ) -> Result<(), String> {
-  if payload.password.len() < 8 {
-    return Err("Password must be at least 8 characters".into());
-  }
+  validate_password(&payload.password)?;
+  logging::log_info("Attempting to set up new account");
   let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
   if has_user_account(&conn) {
     return Err("Account already exists".into());
@@ -68,8 +107,14 @@ pub fn auth_setup(
 pub fn auth_login(
   db: State<'_, DbConn>,
   auth: State<'_, AuthState>,
+  rate_limiter: State<'_, RateLimiter>,
   payload: PasswordPayload,
 ) -> Result<(), String> {
+  // Check rate limiting
+  if rate_limiter.is_locked() {
+    return Err("Account is temporarily locked due to too many failed attempts. Please try again later.".to_string());
+  }
+  
   let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
   let hash_str: String = conn
     .query_row(
@@ -81,10 +126,17 @@ pub fn auth_login(
   let parsed = PasswordHash::new(&hash_str).map_err(|e| e.to_string())?;
   Argon2::default()
     .verify_password(payload.password.as_bytes(), &parsed)
-    .map_err(|_| "Invalid password".to_string())?;
+    .map_err(|_| {
+      // Record failure before returning error
+      let _ = rate_limiter.record_failure();
+      audit::log_audit_event(AuditEventType::Login, Some("user"), "Failed login attempt - invalid password");
+      "Invalid password".to_string()
+    })?;
   if let Ok(mut g) = auth.authenticated.lock() {
     *g = true;
   }
+  rate_limiter.record_success();
+  audit::log_audit_event(AuditEventType::Login, Some("user"), "Successful login");
   Ok(())
 }
 
@@ -93,6 +145,7 @@ pub fn auth_logout(auth: State<'_, AuthState>) -> Result<(), String> {
   if let Ok(mut g) = auth.authenticated.lock() {
     *g = false;
   }
+  audit::log_audit_event(AuditEventType::Logout, Some("user"), "User logged out");
   Ok(())
 }
 
@@ -106,9 +159,8 @@ pub fn auth_change_password(
   let is_auth = is_authenticated(&auth)?;
   let conn = db.conn.lock().map_err(|_| "database lock".to_string())?;
   db::require_authenticated(&conn, is_auth)?;
-  if new_password.len() < 8 {
-    return Err("New password must be at least 8 characters".into());
-  }
+  validate_password(&new_password)?;
+  logging::log_info("Attempting to change password");
   let hash_str: String = conn
     .query_row(
       "SELECT password_hash FROM users WHERE id = 1",

@@ -23,5 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check
+      - run: cargo test --no-run
+        working-directory: src-tauri
+      - run: cargo clippy -- -D warnings
         working-directory: src-tauri
