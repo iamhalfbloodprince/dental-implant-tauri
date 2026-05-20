@@ -1,0 +1,8 @@
+3D tooth mesh (tooth-reference.glb)
+===================================
+Source repository: https://github.com/Igor-Vuk/dentist-dream
+Original filename in upstream: public/models/tooth-final.glb
+
+This asset is bundled only as a teaching / visualization reference for the oral viewer.
+The upstream repository did not include a root LICENSE file at the time this file was vendored.
+Verify licensing and obtain permission before any commercial redistribution beyond fair-use attribution.

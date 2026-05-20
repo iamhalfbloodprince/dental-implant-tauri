@@ -1,0 +1,13 @@
+pub mod auth;
+pub mod backup;
+pub mod clinics;
+pub mod clinical;
+pub mod dashboard;
+pub mod fee_items;
+pub mod file_store;
+pub mod followups;
+pub mod letters;
+pub mod logbook;
+pub mod paths;
+pub mod patients;
+pub mod reports;
